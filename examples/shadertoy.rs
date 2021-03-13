@@ -1,5 +1,7 @@
 use macroquad::prelude::*;
 
+// TODO: switch to macroquad's UI
+// the last unported piece!
 use megaui_macroquad::{
     draw_megaui, draw_window,
     megaui::{
@@ -376,6 +378,7 @@ async fn main() {
                 MaterialParams {
                     pipeline_params,
                     uniforms,
+                    textures: vec![],
                 },
             ) {
                 Ok(new_material) => {

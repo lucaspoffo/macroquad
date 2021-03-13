@@ -1,8 +1,14 @@
+//! Legacy module, code should be either removed or moved to different modules
+
 use miniquad::*;
 
 pub use colors::*;
 
 pub use miniquad::{FilterMode, ShaderError};
+
+use crate::texture::Image;
+
+use std::collections::BTreeMap;
 
 //use crate::telemetry;
 
@@ -426,6 +432,8 @@ struct PipelineExt {
     wants_screen_texture: bool,
     uniforms: Vec<Uniform>,
     uniforms_data: [u8; UNIFORMS_ARRAY_SIZE],
+    textures: Vec<String>,
+    textures_data: BTreeMap<String, Texture>,
 }
 
 struct PipelinesStorage {
@@ -467,6 +475,7 @@ impl PipelinesStorage {
             },
             false,
             vec![],
+            vec![],
         );
         assert_eq!(triangles_pipeline, Self::TRIANGLES_PIPELINE);
 
@@ -478,6 +487,7 @@ impl PipelinesStorage {
                 ..params
             },
             false,
+            vec![],
             vec![],
         );
         assert_eq!(lines_pipeline, Self::LINES_PIPELINE);
@@ -493,6 +503,7 @@ impl PipelinesStorage {
             },
             false,
             vec![],
+            vec![],
         );
         assert_eq!(triangles_depth_pipeline, Self::TRIANGLES_DEPTH_PIPELINE);
 
@@ -507,6 +518,7 @@ impl PipelinesStorage {
             },
             false,
             vec![],
+            vec![],
         );
         assert_eq!(lines_depth_pipeline, Self::LINES_DEPTH_PIPELINE);
 
@@ -520,6 +532,7 @@ impl PipelinesStorage {
         params: PipelineParams,
         wants_screen_texture: bool,
         uniforms: Vec<(String, UniformType)>,
+        textures: Vec<String>,
     ) -> GlPipeline {
         let pipeline = Pipeline::with_params(
             ctx,
@@ -528,6 +541,7 @@ impl PipelinesStorage {
                 VertexAttribute::new("position", VertexFormat::Float3),
                 VertexAttribute::new("texcoord", VertexFormat::Float2),
                 VertexAttribute::new("color0", VertexFormat::Byte4),
+
             ],
             shader,
             params,
@@ -560,11 +574,14 @@ impl PipelinesStorage {
                 Some(uniform)
             })
             .collect();
+
         self.pipelines[id] = Some(PipelineExt {
             pipeline,
             wants_screen_texture,
             uniforms,
             uniforms_data: [0; UNIFORMS_ARRAY_SIZE],
+            textures,
+            textures_data: BTreeMap::new(),
         });
         self.pipelines_amount += 1;
 
@@ -638,6 +655,7 @@ impl QuadGl {
         fragment_shader: &str,
         params: PipelineParams,
         uniforms: Vec<(String, UniformType)>,
+        textures: Vec<String>,
     ) -> Result<GlPipeline, ShaderError> {
         let mut shader_meta: ShaderMeta = shader::meta();
 
@@ -648,12 +666,31 @@ impl QuadGl {
                 .push(UniformDesc::new(&uniform.0, uniform.1));
         }
 
+        for texture in &textures {
+            if texture == "Texture" {
+                panic!(
+                    "you can't use name `Texture` for your texture. This name is reserved for the texture that will be drawed with that material"
+                );
+            }
+            if texture == "_ScreenTexture" {
+                panic!(
+                    "you can't use name `_ScreenTexture` for your texture in shaders. This name is reserved for screen texture"
+                );
+            }
+            shader_meta.images.push(texture.clone());
+        }
+
         let shader = Shader::new(ctx, vertex_shader, fragment_shader, shader_meta)?;
         let wants_screen_texture = fragment_shader.find("_ScreenTexture").is_some();
 
-        Ok(self
-            .pipelines
-            .make_pipeline(ctx, shader, params, wants_screen_texture, uniforms))
+        Ok(self.pipelines.make_pipeline(
+            ctx,
+            shader,
+            params,
+            wants_screen_texture,
+            uniforms,
+            textures,
+        ))
     }
 
     /// Reset only draw calls state
@@ -729,6 +766,14 @@ impl QuadGl {
                 || Texture::empty(),
                 |texture| texture.raw_miniquad_texture_handle(),
             );
+            bindings
+                .images
+                .resize(2 + pipeline.textures.len(), Texture::empty());
+            for (pos, name) in pipeline.textures.iter().enumerate() {
+                if let Some(texture) = pipeline.textures_data.get(name).copied() {
+                    bindings.images[2 + pos] = texture;
+                }
+            }
 
             ctx.apply_pipeline(&pipeline.pipeline);
             if let Some(clip) = dc.clip {
@@ -910,6 +955,24 @@ impl QuadGl {
         transmute_uniform!(uniform_byte_size, uniform_byte_offset, 16);
         transmute_uniform!(uniform_byte_size, uniform_byte_offset, 64);
     }
+
+    pub fn set_texture(&mut self, pipeline: GlPipeline, name: &str, texture: Texture2D) {
+        let pipeline = self.pipelines.get_quad_pipeline_mut(pipeline);
+        pipeline
+            .textures
+            .iter()
+            .find(|x| *x == name)
+            .unwrap_or_else(|| {
+                panic!(
+                    "can't find texture with name '{}', there is only this names: {:?}",
+                    name, pipeline.textures
+                )
+            });
+        *pipeline
+            .textures_data
+            .entry(name.to_owned())
+            .or_insert(texture.texture) = texture.texture;
+    }
 }
 
 /// Texture, data stored in GPU memory
@@ -1011,130 +1074,6 @@ impl Texture2D {
         self.texture.read_pixels(&mut image.bytes);
 
         image
-    }
-}
-
-/// Image, data stored in CPU memory
-pub struct Image {
-    pub bytes: Vec<u8>,
-    pub width: u16,
-    pub height: u16,
-}
-
-impl Image {
-    pub fn from_file_with_format(bytes: &[u8], format: Option<image::ImageFormat>) -> Image {
-        let img = if let Some(fmt) = format {
-            image::load_from_memory_with_format(&bytes, fmt)
-                .unwrap_or_else(|e| panic!("{}", e))
-                .to_rgba8()
-        } else {
-            image::load_from_memory(&bytes)
-                .unwrap_or_else(|e| panic!("{}", e))
-                .to_rgba8()
-        };
-        let width = img.width() as u16;
-        let height = img.height() as u16;
-        let bytes = img.into_raw();
-
-        Image {
-            width,
-            height,
-            bytes,
-        }
-    }
-
-    pub fn empty() -> Image {
-        Image {
-            width: 0,
-            height: 0,
-            bytes: vec![],
-        }
-    }
-
-    pub fn gen_image_color(width: u16, height: u16, color: Color) -> Image {
-        let mut bytes = vec![0; width as usize * height as usize * 4];
-        for i in 0..width as usize * height as usize {
-            bytes[i * 4 + 0] = (color.r * 255.) as u8;
-            bytes[i * 4 + 1] = (color.g * 255.) as u8;
-            bytes[i * 4 + 2] = (color.b * 255.) as u8;
-            bytes[i * 4 + 3] = (color.a * 255.) as u8;
-        }
-        Image {
-            width,
-            height,
-            bytes,
-        }
-    }
-
-    pub fn update(&mut self, colors: &[Color]) {
-        assert!(self.width as usize * self.height as usize == colors.len());
-
-        for i in 0..colors.len() {
-            self.bytes[i * 4] = (colors[i].r * 255.) as u8;
-            self.bytes[i * 4 + 1] = (colors[i].g * 255.) as u8;
-            self.bytes[i * 4 + 2] = (colors[i].b * 255.) as u8;
-            self.bytes[i * 4 + 3] = (colors[i].a * 255.) as u8;
-        }
-    }
-    pub fn width(&self) -> usize {
-        self.width as usize
-    }
-
-    pub fn height(&self) -> usize {
-        self.height as usize
-    }
-
-    pub fn get_image_data(&self) -> &[[u8; 4]] {
-        use std::slice;
-
-        unsafe {
-            slice::from_raw_parts(
-                self.bytes.as_ptr() as *const [u8; 4],
-                self.width as usize * self.height as usize,
-            )
-        }
-    }
-
-    pub fn get_image_data_mut(&mut self) -> &mut [[u8; 4]] {
-        use std::slice;
-
-        unsafe {
-            slice::from_raw_parts_mut(
-                self.bytes.as_mut_ptr() as *mut [u8; 4],
-                self.width as usize * self.height as usize,
-            )
-        }
-    }
-
-    pub fn set_pixel(&mut self, x: u32, y: u32, color: Color) {
-        let width = self.width;
-
-        self.get_image_data_mut()[(y * width as u32 + x) as usize] = color.into();
-    }
-
-    pub fn get_pixel(&self, x: u32, y: u32) -> Color {
-        self.get_image_data()[(y * self.width as u32 + x) as usize].into()
-    }
-
-    pub fn export_png(&self, path: &str) {
-        let mut bytes = vec![0; self.width as usize * self.height as usize * 4];
-
-        // flip the image before saving
-        for y in 0..self.height as usize {
-            for x in 0..self.width as usize * 4 {
-                bytes[y * self.width as usize * 4 + x] =
-                    self.bytes[(self.height as usize - y - 1) * self.width as usize * 4 + x];
-            }
-        }
-
-        image::save_buffer(
-            path,
-            &bytes[..],
-            self.width as _,
-            self.height as _,
-            image::ColorType::Rgba8,
-        )
-        .unwrap();
     }
 }
 
